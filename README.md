@@ -1,0 +1,1 @@
+# AGRIFOLD-AGRIculture-Federated-Learning-for-Optimized-Leaf-Disease-detection
