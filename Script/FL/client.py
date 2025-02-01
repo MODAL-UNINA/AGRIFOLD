@@ -1,0 +1,509 @@
+# %%
+import json
+import os
+import time
+import torch
+import argparse
+import flwr as fl
+import numpy as np
+import torchprofile
+from tqdm import tqdm
+import torch.nn as nn
+import torch_pruning as tp
+from torchvision import models
+import matplotlib.pyplot as plt
+from collections import OrderedDict
+from torch.utils.data import DataLoader, Dataset
+
+from utils import is_interactive
+from sklearn.model_selection import train_test_split
+
+
+parser = argparse.ArgumentParser(allow_abbrev=False)
+
+parser.add_argument("--gpuid", type=int, default=1, help="GPU number to use")
+parser.add_argument("--batch-size", type=int, default=64, help="Batch size")
+parser.add_argument("--client_id", type=int, default=0, help="Client ID")
+parser.add_argument("--epochs", type=int, default=1, help="Epochs per round")
+parser.add_argument("--server-address", type=str, default="localhost:12389", help="Address of the server")
+parser.add_argument("--ablation", type=str, default="None", help="Ablation study")
+parser.add_argument("--pruning", type=bool, default=False, help="Pruning")
+parser.add_argument("--pruning-ratio", type=float, default=0.5, help="Pruning ratio")
+
+
+if is_interactive():
+  args, _ = parser.parse_known_args()
+else:
+  args = parser.parse_args()
+
+
+gpu_id = args.gpuid
+batch_size = args.batch_size
+num_epochs= args.epochs
+client_id = args.client_id
+server_address = args.server_address
+
+DEVICE = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
+
+  
+class Net(nn.Module):
+  """Constructs a ECA module.
+
+  Args:
+    channel: Number of channels of the input feature map
+    k_size: Adaptive selection of kernel size
+  """
+  def __init__(self, channel, k_size=3):
+    super(Net, self).__init__()
+    self.avg_pool = nn.AdaptiveAvgPool2d(1)
+    self.conv = nn.Conv1d(1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False) 
+    self.sigmoid = nn.Sigmoid()
+    self.feature_maps = None
+      
+
+  def forward(self, x):
+
+    y = self.avg_pool(x)
+
+    # Two different branches of ECA module
+    y = self.conv(y.squeeze(-1).transpose(-1, -2)).transpose(-1, -2).unsqueeze(-1)
+
+    # Multi-scale information fusion
+    y = self.sigmoid(y)
+
+    self.feature_maps = x * y.expand_as(x)
+
+    return self.feature_maps 
+
+
+
+class VGG16WithECA(nn.Module):
+  def __init__(self, num_classes=10, kernel_size=3, pretrained=True):
+    super(VGG16WithECA, self).__init__()
+
+    vgg = models.vgg16(pretrained=pretrained)
+
+    for param in vgg.features.parameters():
+      param.requires_grad = True
+    
+    self.features = nn.Sequential(
+
+      *vgg.features[:5],  # Conv1-Conv2 + ReLU
+      Net(kernel_size),     
+
+      *vgg.features[5:10],  # Conv3-Conv4 + ReLU
+      Net(kernel_size),
+
+      *vgg.features[10:17],  # Conv5-Conv7 + ReLU
+      Net(kernel_size),
+      
+      *vgg.features[17:24],  # Conv8-Conv10 + ReLU
+      Net(kernel_size),
+
+      *vgg.features[24:],  # Conv11-Conv13 + ReLU
+      Net(kernel_size)
+    )
+
+    if args.ablation == 'a':
+      self.classifier = nn.Sequential(
+          nn.Linear(512 * 7 * 7, 2048),  
+          nn.ReLU(),
+          nn.Dropout(0.5),
+          nn.Linear(2048, num_classes)  
+      )
+    
+    elif args.ablation == 'b':
+      self.classifier = nn.Linear(512 * 7 * 7, num_classes)
+
+    elif args.ablation == 'c':
+
+      self.classifier = nn.Sequential(
+        nn.Linear(512 * 7 * 7, 1024),  
+        nn.ReLU(),                     
+        nn.Dropout(0.5),               
+        nn.Linear(1024, num_classes)   
+        )
+    
+    else:
+      self.classifier = vgg.classifier
+      self.classifier[-1] = nn.Linear(4096, num_classes)
+      
+
+    
+  def forward(self, x):
+    x = self.features(x)
+    x = torch.flatten(x, 1)
+    x = self.classifier(x)
+    return x
+  
+  def get_last_eca_feature_maps(self):
+    return self.features[-1].feature_maps
+
+
+
+
+class CustomDataset(Dataset):
+    def __init__(self, file_paths, class_labels, transform=None):
+      
+      self.file_paths = file_paths
+      self.class_labels = class_labels
+      self.transform = transform
+
+      self.label_map = {label: idx for idx, label in enumerate(self.class_labels)}
+
+    def __len__(self):
+      return len(self.file_paths)
+
+    def __getitem__(self, idx):
+      file_path = self.file_paths[idx]
+
+      label = None
+      for class_name in self.class_labels:
+        if f"/{class_name}/" in file_path:
+          label = self.label_map[class_name]
+          break
+      if label is None:
+        raise ValueError(f"Etichetta non trovata per il file: {file_path}")
+
+      data = np.load(file_path)
+      image = data['normalized_image']
+
+      image = torch.tensor(image, dtype=torch.float32)
+
+      return image, label
+      
+
+def train(client_id, net, train_loader, val_loader, epochs, train_losses, train_accuracies, val_losses, val_accuracies):
+  
+  """Train the model on the training set."""
+  criterion = torch.nn.CrossEntropyLoss()
+  optimizer = torch.optim.SGD(net.parameters(), lr=0.0001, momentum=0.9)
+
+  for epoch in range(epochs): 
+    net.train()
+    train_loss = 0
+    correct_train = 0
+    total_train = 0
+
+    pbar = tqdm(train_loader, total=len(train_loader))
+  
+    for images, labels in pbar: 
+      labels = labels.to(DEVICE)
+      optimizer.zero_grad()
+      outputs = net(images.permute(0,3,1,2).to(DEVICE))
+      loss = criterion(outputs, labels)
+      loss.backward()
+      optimizer.step()
+
+      train_loss += loss.item() * labels.size(0)
+      _, predicted = torch.max(outputs.data, 1)
+      total_train += labels.size(0)
+      correct_train += (predicted == labels).sum().item()
+      pbar.set_postfix({'Batch Loss': loss.item(), 'Loss': train_loss / total_train, 'Accuracy': (100 * correct_train / total_train)})
+
+    avg_train_loss = train_loss / total_train
+    train_accuracy = 100 * correct_train / total_train
+
+    train_losses.append(avg_train_loss)
+    train_accuracies.append(train_accuracy)
+
+
+    print ('Epoch [{}/{}], Training Loss: {:.4f}, Accuracy: {:.2f}%' 
+          .format(epoch+1, epochs, avg_train_loss, train_accuracy))
+    
+
+    model_weights = net.state_dict()
+    torch.save(model_weights, f"model_eca_client_{client_id}.pth")
+
+
+    if len(val_loader.dataset) != 0:
+                
+      # Validation
+      net.eval()
+      val_loss = 0
+      correct_val = 0
+      total_val = 0
+      with torch.no_grad():
+        for images, labels in val_loader: 
+          labels = labels.to(DEVICE)
+          images = images.permute(0,3,1,2).to(DEVICE) 
+          outputs = net(images).to(DEVICE)
+          val_loss += criterion(outputs, labels).item() * labels.size(0)
+          _, predicted = torch.max(outputs.data, 1)
+          total_val += labels.size(0)
+          correct_val += (predicted == labels).sum().item()
+          #del images, labels, outputs
+          
+          avg_val_loss = val_loss / total_val
+          val_accuracy = 100 * correct_val / total_val
+
+          val_losses.append(avg_val_loss)
+          val_accuracies.append(val_accuracy)
+
+          print('Epoch [{}/{}], Validation Loss: {:.4f}, Accuracy: {:.2f}%'.format(
+          epoch + 1, epochs, avg_val_loss, val_accuracy))
+
+           # Early stopping
+          if val_loss < best_loss:
+            best_loss = val_loss     
+            patience = 10  # Reset patience counter
+          else:
+            patience -= 1
+            if patience == 0:
+              print("Early stopping triggered!")
+              break
+              
+
+  return  train_losses, train_accuracies, val_losses, val_accuracies
+
+
+
+
+def test(net, testloader):
+  """Validate the model on the test set."""
+
+  all_labels = []
+  all_predictions = []
+
+  criterion = torch.nn.CrossEntropyLoss()
+  correct, total, loss = 0, 0, 0.0
+  with torch.no_grad():
+    for images, labels in testloader:
+      labels = labels.to(DEVICE)
+      images = images.to(DEVICE)
+      images = images.permute(0,3,1,2)   
+      outputs = net(images)
+      loss += criterion(outputs, labels.to(DEVICE)).item()
+    
+      _, predicted = torch.max(outputs.data, 1)
+      all_labels.extend(labels.cpu().numpy())
+      all_predictions.extend(predicted.cpu().numpy())
+
+
+      total += labels.size(0)
+      correct += (predicted == labels).sum().item()
+
+    print('Accuracy of the network on the {} test images: {} %'.format(len(testloader.dataset), 100 * correct / total))
+    
+    print('Loss of the network on the {} test images: {}'.format(len(testloader.dataset), loss / len(testloader.dataset)))
+  return loss / len(testloader.dataset), correct / total
+
+
+
+
+def balance_data_from_json(json_data, train_ratio=0.7, random_seed=42):
+  
+  splits = {'train': [], 'val': [], 'test': []}
+
+  for disease, v in json_data.items(): 
+    for fruit, paths in v.items(): 
+
+      if len(paths) == 0:
+        continue
+
+      train_paths, temp_paths = train_test_split(
+        paths, 
+        train_size=train_ratio, 
+        random_state=random_seed
+      )
+      test_paths = temp_paths
+
+      splits['train'].extend(train_paths)
+      splits['test'].extend(test_paths)
+
+  print(f"{disease}: {len(splits['train'])} train, {len(splits['val'])} val, {len(splits['test'])} test")
+  print(f"Total: {len(splits['train']) + len(splits['val']) + len(splits['test'])} images")
+  return splits
+
+
+def load_data(dataset, batch_size):
+  """Load CIFAR-10 (training and test set)."""
+
+  split_data = balance_data_from_json(dataset, random_seed=42)
+
+
+  print(f"Train set: {len(split_data['train'])} images")
+  print(f"Validation set: {len(split_data['val'])} images")
+  print(f"Test set: {len(split_data['test'])} images")
+
+  class_labels = list(dataset.keys())
+
+  # Dataset
+  train_dataset = CustomDataset(split_data['train'], class_labels)
+  val_dataset = CustomDataset(split_data['val'], class_labels)
+  test_dataset = CustomDataset(split_data['test'], class_labels)
+
+  train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+  val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+  test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+  return train_loader, val_loader, test_loader
+
+
+
+# %%
+class FlowerClient(fl.client.NumPyClient):
+  
+  def __init__(self, client_id) -> None:
+        
+    self.train_losses = []
+    self.train_accuracies = []
+    self.val_losses = []
+    self.val_accuracies = []
+    self.all_labels = []
+    self.all_predictions = []
+    self.client_id = client_id
+    self.num_epochs = num_epochs 
+
+  def get_parameters(self, config):
+    return [val.cpu().numpy() for _, val in net.state_dict().items()]
+
+  def set_parameters(self, parameters):
+    params_dict = zip(net.state_dict().keys(), parameters)
+    state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+    net.load_state_dict(state_dict, strict=True)
+
+  def fit(self, parameters, config):
+    self.set_parameters(parameters)
+    self.train_losses , self.train_accuracies, self.val_losses, self.val_accuracies = train(
+      self.client_id, net, train_loader, val_loader, self.num_epochs, self.train_losses, self.train_accuracies,
+        self.val_losses, self.val_accuracies)
+    
+    self.plot()
+
+    return self.get_parameters(config={}), len(train_loader.dataset), {}
+
+  def evaluate(self, parameters, config):
+    self.set_parameters(parameters)
+    loss, accuracy = test(net, test_loader)
+    return float(loss), len(test_loader.dataset), {"accuracy": float(accuracy)}
+  
+  def plot(self):
+     
+    num_rounds = len(self.train_losses) // self.num_epochs
+
+    round_ticks = [i * num_epochs for i in range(num_rounds)]
+
+    output_dir = "output_flower"
+    os.makedirs(output_dir, exist_ok=True)
+    output_file = os.path.join(output_dir, f'metrics_client_{client_id}.png')
+
+    # Plot
+    plt.figure(figsize=(12, 6))
+
+    # Subplot 1: Loss
+    plt.subplot(1, 2, 1)
+    plt.plot(self.train_losses, label='Training Loss')
+    if self.val_losses != []:
+      plt.plot(self.val_losses, label='Validation Loss')
+    plt.title('Loss Over Rounds')
+    plt.xlabel('Rounds')
+    plt.ylabel('Loss')
+    plt.xticks(round_ticks, labels=[str(i + 1) for i in range(num_rounds)]) 
+    plt.legend()
+
+    # Subplot 2: Accuracy
+    plt.subplot(1, 2, 2)
+    plt.plot(self.train_accuracies, label='Training Accuracy')
+    if self.val_accuracies != []:
+      plt.plot(self.val_accuracies, label='Validation Accuracy')
+    plt.title('Accuracy Over Rounds')
+    plt.xlabel('Rounds')
+    plt.ylabel('Accuracy (%)')
+    plt.xticks(round_ticks, labels=[str(i + 1) for i in range(num_rounds)]) 
+    plt.legend()
+
+    plt.tight_layout()
+    plt.savefig(output_file)
+
+
+def calculate_model_size(model, file_path="temp_model.pth"):
+    torch.save(model.state_dict(), file_path)
+    model_size = os.path.getsize(file_path) / 1e6  # MB
+    os.remove(file_path)
+    return model_size
+
+# %%
+file_path = "load.json"
+
+with open(file_path, 'r') as d:
+  dic = json.load(d)
+
+disease_data_path = "Preprocessed_dictionary_new_conf_modified_without_enh.json"
+
+with open(disease_data_path, 'r') as f:
+  disease_data = json.load(f)
+
+
+if client_id >= len(disease_data.keys()):
+  import sys
+
+  print(f"Client ID {client_id} does not exist for id {client_id}. Closing.")
+  sys.exit(0)
+
+print("Client ID:", client_id)
+dataset = dic[str(client_id)]
+
+print("Selected dataset:" , dataset)
+
+dataset = disease_data[dataset] 
+
+sum_images = 0
+for disease, v in dataset.items():
+  for fruit, paths in v.items():
+    sum_images += len(paths)
+print(f"Total: {sum_images} images")
+
+class_labels = list(dataset.keys())
+
+# Load model and data
+net = VGG16WithECA(num_classes = len(class_labels)).to(DEVICE)
+train_loader, val_loader, test_loader = load_data(dataset, batch_size)
+
+model_size = calculate_model_size(net)
+print(f"Model size: {model_size:.2f} MB")
+
+# Wait for server status file
+server_status_file = f"../0/status_server.txt"
+print('path exist:', os.path.exists(server_status_file))
+while not os.path.exists(server_status_file):
+  print(f"Waiting for server status file {server_status_file}...")
+  time.sleep(5)
+
+if args.pruning:
+  example_inputs = torch.randn(1, 3, 224, 224).to(DEVICE)
+
+  # 1. Importance criterion, here we calculate the L2 Norm of grouped weights as the importance score
+  imp = tp.importance.GroupNormImportance(p=2) 
+
+  # 2. Initialize a pruner with the model and the importance criterion
+  ignored_layers = []
+  for m in net.modules():
+    if isinstance(m, torch.nn.Linear) and m.out_features == 1000:
+      ignored_layers.append(m) # DO NOT prune the final classifier!
+
+  pruner = tp.pruner.MetaPruner(
+    net,
+    example_inputs,
+    importance=imp,
+    pruning_ratio=args.pruning_ratio,
+    ignored_layers=ignored_layers,
+    round_to=8,
+  )
+
+  # 3. Prune the model
+  pruner.step()
+
+
+  # 4. Compute MACs and num_params
+  with torch.no_grad():
+    profile = torchprofile.profile_macs(net, example_inputs)
+    params = sum(p.numel() for p in net.parameters())
+    print(f"MACs: {profile / 1e9} G, Params: {params / 1e6} M")
+
+  model_size = calculate_model_size(net)
+  print(f"Model size after pruning: {model_size:.2f} MB")
+
+# Start Flower client
+fl.client.start_client(grpc_max_message_length = 538_145_477, server_address = server_address, client=FlowerClient(client_id).to_client())
+
