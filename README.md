@@ -5,3 +5,6 @@ Efficient and accurate detection of plant leaf diseases is crucial for safeguard
 
 ![Framework](architecture.jpg)
 ## Acknowledgments
+This work was supported by: 
+- PNRR Centro Nazionale HPC, Big Data e Quantum Computing, (CN$_$00000013) (CUP: E63C22000980007), Innovation Fund: SESG, under the NRRP MUR program funded by the NextGenerationEU.
+\bullet G.A.N.D.A.L.F. - Gan Approaches for Non-iiD Aiding Learning in Federations, CUP: E53D23008290006, PNRR - Missione 4 “Istruzione e Ricerca” - Componente C2 Investimento 1.1 “Fondo per il Programma Nazionale di Ricerca e Progetti di Rilevante Interesse Nazionale (PRIN)”.
