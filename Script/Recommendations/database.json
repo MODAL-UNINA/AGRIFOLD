@@ -1,0 +1,75 @@
+{
+    "Late_blight": [
+        "https://ipm.ucanr.edu/PMG/GARDEN/VEGES/DISEASES/lateblight.html",
+        "https://www.britannica.com/science/late-blight",
+        "https://extension.umn.edu/disease-management/late-blight#:~:text=Late%20blight%20is%20a%20potentially,total%20crop%20failure%20if%20untreated.",
+        "https://cropscience.bayer.co.uk/agronomy-id/diseases/potato-diseases/late-blight",
+        "https://hort.extension.wisc.edu/articles/late-blight/"
+    ],
+    "Early_blight": [
+        "https://ipm.ucanr.edu/PMG/GARDEN/VEGES/DISEASES/earlyblight.html",
+        "https://ipm.ucanr.edu/agriculture/potato/early-blight/#gsc.tab=0",
+        "https://extension.umn.edu/disease-management/early-blight-tomato-and-potato",
+        "https://www.koppert.com/plant-diseases/early-blight/",
+        "https://hort.extension.wisc.edu/articles/early-blight/"
+
+    ],
+    "Bacterial_spot": [
+        "https://www.koppert.com/plant-diseases/bacterial-spot/",
+        "https://ipm.ucanr.edu/agriculture/tomato/bacterial-spot/#gsc.tab=0",
+        "https://www.business.qld.gov.au/industries/farms-fishing-forestry/agriculture/biosecurity/plants/diseases/horticultural/bacterial-spot",
+        "https://www.canr.msu.edu/ipm/diseases/bacterial-spot?language_id=",
+        "https://www.gardenia.net/disease/bacterial-leaf-spot"
+    
+    ],
+    "Powdery_mildew": [ 
+        "https://www.koppert.com/plant-diseases/powdery-mildew/",
+        "https://ipm.ucanr.edu/home-and-landscape/powdery-mildew-on-fruits-and-berries/pest-notes/#gsc.tab=0",
+        "https://ipm.ucanr.edu/home-and-landscape/powdery-mildew-on-vegetables/pest-notes/#gsc.tab=0",
+        "https://www.gardendesign.com/how-to/powdery-mildew.html",
+        "https://www.britannica.com/science/powdery-mildew",
+        "https://www.canr.msu.edu/resources/powdery-mildew?language_id=",
+        "https://eos.com/blog/powdery-mildew/"
+
+
+    ],
+    "Black_rot": [
+        "https://ipm.ucanr.edu/agriculture/cole-crops/black-rot/#gsc.tab=0",
+        "https://agritech.tnau.ac.in/crop_protection/cabbage_disease_8.html",
+        "https://www.canr.msu.edu/ipm/diseases/black_rot",
+        "https://www.vegetables.bayer.com/gb/en-uk/knowledge-centre/disease-guides/crucifer/black-rot.html",
+        "https://extension.wvu.edu/lawn-gardening-pests/plant-disease/tree-fruit-disease/black-rot-disease-in-apples"
+
+    ],
+    "Rust": [
+        "https://www.britannica.com/science/rust",
+        "https://www.canr.msu.edu/resources/rust-diseases-other?language_id=",
+        "https://en.wikipedia.org/wiki/Rust_(fungus)",
+        "https://www.rhs.org.uk/disease/rust-diseases",
+        "https://www.gardentech.com/disease/rust"
+
+    ],
+    "Brown_spot": [
+        "https://www.thespruce.com/treating-brown-spots-on-leaves-5076039",
+        "https://doa.gov.lk/rrdi_ricediseases_brownspot/",
+        "https://agrio.app/library/BrownLeafSpot/",
+        "https://guide.utcrops.com/soybean/foliar-diseases/brown-spot/",
+        "http://www.knowledgebank.irri.org/training/fact-sheets/pest-management/diseases/item/brown-spot"
+
+    ],
+    "Yellow": [
+        "https://agritech.tnau.ac.in/crop_protection/sugarcane_diseases/sugarcane_d1.html",
+        "https://www.pennington.com/all-products/fertilizer/resources/why-plant-leaves-turn-yellow-and-how-to-fix-them",
+        "https://agriculture.vic.gov.au/biosecurity/plant-diseases/vegetable-diseases/tomato-yellow-leaf-curl-virus",
+        "https://plantix.net/en/library/plant-diseases/200066/sugarcane-yellow-leaf-virus/",
+        "https://ipm.ucanr.edu/agriculture/tomato/tomato-yellow-leaf-curl/#gsc.tab=0"
+    ],
+    "Mosaic": [
+        "https://www.britannica.com/science/mosaic-plant-disease",
+        "https://www.gardenia.net/disease/mosaic-viruses#:~:text=Mosaic%20viruses%20are%20a%20group,through%20contaminated%20seeds%20or%20cuttings.",
+        "https://www.planetnatural.com/pest-problem-solver/plant-disease/mosaic-virus/",
+        "https://ipm.ucanr.edu/agriculture/tomato/mosaic-diseases-caused-by-potyviruses/#gsc.tab=0",
+        "http://www.oisat.org/pests/diseases/viral/mosaic_virus.html"
+
+    ]
+}

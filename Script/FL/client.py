@@ -163,7 +163,7 @@ class CustomDataset(Dataset):
           label = self.label_map[class_name]
           break
       if label is None:
-        raise ValueError(f"Etichetta non trovata per il file: {file_path}")
+        raise ValueError(f"Label not found for file: {file_path}")
 
       data = np.load(file_path)
       image = data['normalized_image']
@@ -246,7 +246,7 @@ def train(client_id, net, train_loader, val_loader, epochs, train_losses, train_
            # Early stopping
           if val_loss < best_loss:
             best_loss = val_loss     
-            patience = 10  # Reset patience counter
+            patience = 10  
           else:
             patience -= 1
             if patience == 0:
@@ -429,7 +429,7 @@ file_path = "load.json"
 with open(file_path, 'r') as d:
   dic = json.load(d)
 
-disease_data_path = "Preprocessed_dictionary_new_conf_modified_without_enh.json"
+disease_data_path = "Preprocessing/Preprocessed_dictionary.json"
 
 with open(disease_data_path, 'r') as f:
   disease_data = json.load(f)

@@ -1,5 +1,5 @@
 #%%
-
+import os
 import json
 import torch
 import cv2
@@ -70,7 +70,7 @@ class VGG16WithECA(nn.Module):
       Net(kernel_size)
     )
 
-    # Classifier (cambia l'ultimo livello)
+    # Classifier 
     self.classifier = vgg.classifier
     self.classifier[-1] = nn.Linear(4096, num_classes)
         
@@ -81,7 +81,6 @@ class VGG16WithECA(nn.Module):
         return x
     
     def get_last_eca_feature_maps(self):
-        # Restituisce le feature maps dell'ultimo eca_layer
         return self.features[-1].feature_maps
 
 
@@ -125,7 +124,7 @@ def predict_class(model, input_tensor):
 
 #%%
 
-file_path_1 = "../New_configuration_json/test_data_new_jpg.json"
+file_path_1 = "Preprocessing/test_data_jpg.json"
 
 
 with open(file_path_1, 'r') as f:
@@ -135,7 +134,7 @@ num_cols = 2
 
 
 for client_id in range(0, 12):
-    model_path = f"../Flower_federated_bash/client_models/{job_id}/model_eca_client_{client_id}.pth"
+    model_path = f"model_eca_client_{client_id}.pth"
     
     model.load_state_dict(
         torch.load(
@@ -154,7 +153,7 @@ for client_id in range(0, 12):
 
     for class_name in classes:
         if preprocessed_dict[class_name] == []:
-            print(f"{dataset}: Classe {class_name} vuota")
+            print(f"{dataset}: Empty class: {class_name}")
             continue
 
         image = image_dict[dataset][class_name][1]
@@ -172,7 +171,8 @@ for client_id in range(0, 12):
         true_index = model.class_to_idx[class_name]
         prediction_correct = 1 if predicted_index == true_index else 0
 
-        output_path = f'../Flower_federated_bash/heatmaps/{dataset}_{class_name}.jpg'
+        output_path = f'heatmaps/{dataset}_{class_name}.jpg'
+        os.makedirs('heatmaps', exist_ok=True)
         cv2.imwrite(output_path, heatmap_img)
 
         heatmap_img = cv2.imread(output_path)
@@ -198,7 +198,7 @@ for client_id in range(0, 12):
             fig.suptitle(f"{dataset}\n{class_name}", fontsize=20)
 
         plt.subplots_adjust(top=0.9)
-        plt.savefig(f"../Flower_federated_bash/heatmaps/{dataset}_{class_name}_comparison.jpg")
+        plt.savefig(f"heatmaps/{dataset}_{class_name}_comparison.jpg")
 
 
 

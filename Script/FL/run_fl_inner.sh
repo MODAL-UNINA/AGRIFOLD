@@ -1,6 +1,6 @@
 #!/bin/bash
-#SBATCH --output=output/%j_%2n_%2t_output.txt    # Output del server
-#SBATCH --error=output/%j_%2n_%2t_error.txt      # Errori del server
+#SBATCH --output=output/%j_%2n_%2t_output.txt   
+#SBATCH --error=output/%j_%2n_%2t_error.txt      
 
 batch_size=256
 epochs=5
@@ -58,14 +58,14 @@ cp *.py *.json runs/$SLURM_JOB_ID/$TASKID
 if [[ $TASKID -eq 0 ]]; then
     echo "Server"
     cd runs/$SLURM_JOB_ID
-    ln -s ../../Preprocessed_dataset_new_conf_modified_without_enh ./
+    ln -s ../Preprocessing/Preprocessed_datasets ./
     echo "Preprocessed datasets folder linked"
     cd $TASKID
 else
     echo "Client"
     cd runs/$SLURM_JOB_ID/$TASKID
     sleep 10
-    while [ ! -d "../Preprocessed_dataset_new_conf_modified_without_enh" ]; do
+    while [ ! -d "../Preprocessing/Preprocessed_datasets" ]; do
         echo "Waiting for Preprocessed datasets folder to be created"
         sleep 10
     done
@@ -93,7 +93,7 @@ else
                 --client_id=$client_id \
                 "
 
-    echo "Lancio client $client_id con GPU $GPUID"
+    echo "Client launch $client_id with GPU $GPUID"
     sleep 5
 
 fi
@@ -101,14 +101,14 @@ fi
 
 
 if [[ -f $PY_SCRIPT ]]; then
-    echo "File trovato: $PY_SCRIPT"
+    echo "File found: $PY_SCRIPT"
     ls -l $PY_SCRIPT
 else
-    echo "Errore: Il file $PY_SCRIPT non esiste nella directory $(pwd)"
+    echo "Error: File $PY_SCRIPT does not exist in the directory $(pwd)"
     exit 1
 fi
 
-echo "Directory corrente per TASK $TASKID: $(pwd)"
+echo "Current directory for TASK $TASKID: $(pwd)"
 echo "PARAMS: $PARAMS"
 echo "Running python script"
 echo "Python Start time: $(date)"
