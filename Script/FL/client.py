@@ -317,7 +317,6 @@ def balance_data_from_json(json_data, train_ratio=0.7, random_seed=42):
 
 
 def load_data(dataset, batch_size):
-  """Load CIFAR-10 (training and test set)."""
 
   split_data = balance_data_from_json(dataset, random_seed=42)
 

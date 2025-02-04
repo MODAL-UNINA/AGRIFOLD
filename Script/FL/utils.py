@@ -1,9 +1,6 @@
-
 # %%
 
 import sys
-
-# %%
 
 _interactive_mode = "ipykernel_launcher" in sys.argv[0] or (
     len(sys.argv) == 1 and sys.argv[0] == ""

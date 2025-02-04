@@ -10,7 +10,7 @@ from torchvision import models
 
 
 class_labels = ["Healthy", "Late_blight", "Early_blight", "Bacterial_spot", "Powdery_mildew", "Black_rot", "Rust", "Brown_spot", "Yellow", "Mosaic"]
-job_id=649737
+
 
 class Net(nn.Module):
   """Constructs a ECA module.
@@ -44,35 +44,35 @@ class Net(nn.Module):
 
 
 class VGG16WithECA(nn.Module):
-  def __init__(self, num_classes=10, kernel_size=3, pretrained=True):
-    super(VGG16WithECA, self).__init__()
+    def __init__(self, num_classes=10, kernel_size=3, pretrained=True):
+        super(VGG16WithECA, self).__init__()
 
-    vgg = models.vgg16(pretrained=pretrained)
+        vgg = models.vgg16(pretrained=pretrained)
 
-    for param in vgg.features.parameters():
-      param.requires_grad = True
-    
-    self.features = nn.Sequential(
+        for param in vgg.features.parameters():
+            param.requires_grad = True
+        
+        self.features = nn.Sequential(
 
-      *vgg.features[:5],  # Conv1-Conv2 + ReLU
-      Net(kernel_size),     
+            *vgg.features[:5],  # Conv1-Conv2 + ReLU
+            Net(kernel_size),     
 
-      *vgg.features[5:10],  # Conv3-Conv4 + ReLU
-      Net(kernel_size),
+            *vgg.features[5:10],  # Conv3-Conv4 + ReLU
+            Net(kernel_size),
 
-      *vgg.features[10:17],  # Conv5-Conv7 + ReLU
-      Net(kernel_size),
-      
-      *vgg.features[17:24],  # Conv8-Conv10 + ReLU
-      Net(kernel_size),
+            *vgg.features[10:17],  # Conv5-Conv7 + ReLU
+            Net(kernel_size),
+            
+            *vgg.features[17:24],  # Conv8-Conv10 + ReLU
+            Net(kernel_size),
 
-      *vgg.features[24:],  # Conv11-Conv13 + ReLU
-      Net(kernel_size)
-    )
+            *vgg.features[24:],  # Conv11-Conv13 + ReLU
+            Net(kernel_size)
+        )
 
-    # Classifier 
-    self.classifier = vgg.classifier
-    self.classifier[-1] = nn.Linear(4096, num_classes)
+        # Classifier 
+        self.classifier = vgg.classifier
+        self.classifier[-1] = nn.Linear(4096, num_classes)
         
     def forward(self, x):
         x = self.features(x)
@@ -88,7 +88,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 model = VGG16WithECA(num_classes=10, kernel_size=3, pretrained=True).to(device)
 
 
-def process_image(image_path, npz_path, model):
+def process_image(npz_path, model):
 
     data = np.load(npz_path)
     images = data['normalized_image']

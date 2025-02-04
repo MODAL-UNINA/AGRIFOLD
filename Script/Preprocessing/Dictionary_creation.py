@@ -26,7 +26,6 @@ def func_Plant(d,j,f,load_path):
 
 
 
-
 def func_dictionary(file_path, list_dataset, list_Disease, Fruit, load_path):
     
     dic = {}

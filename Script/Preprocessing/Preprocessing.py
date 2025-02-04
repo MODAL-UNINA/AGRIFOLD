@@ -95,7 +95,7 @@ for d in tqdm.tqdm(list_dataset, total = len(list_dataset)):
 # Dictionary creation
 from Dictionary_creation import func_dictionary
 dic = func_dictionary(file_path_2, list_dataset, list_disease, fruit, load_path)            
-                
+        
 
 
 

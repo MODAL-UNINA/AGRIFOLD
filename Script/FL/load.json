@@ -1,27 +1,27 @@
 
-{"0": "PlantVillage", 
+{
+    "0": "PlantVillage", 
 
-"1": "Potato Leaf", 
+    "1": "Potato Leaf", 
 
-"2": "Potato Disease Leaf Dataset", 
+    "2": "Potato Disease Leaf Dataset", 
 
-"3": "Dataset of Tomato Leaves", 
+    "3": "Dataset of Tomato Leaves", 
 
-"4": "PlantDoc",
+    "4": "PlantDoc",
 
-"5": "Apple Tree Leaf Disease Segmentation Dataset",
+    "5": "Apple Tree Leaf Disease Segmentation Dataset",
 
-"6": "Corn Leaf Disease",
+    "6": "Corn Leaf Disease",
 
-"7": "Indigenous Dataset for Apple Leaf Disease Detection and Classification",
+    "7": "Indigenous Dataset for Apple Leaf Disease Detection and Classification",
 
-"8": "JMUBEN 3",
+    "8": "JMUBEN 3",
 
-"9": "Rice Leaf Disease Image",
+    "9": "Rice Leaf Disease Image",
 
-"10": "Sugarcane Leaf Image",
+    "10": "Sugarcane Leaf Image",
 
-"11": "Sugarcane Leaf Disease"
-
+    "11": "Sugarcane Leaf Disease"
 
 }
