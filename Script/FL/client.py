@@ -12,10 +12,13 @@ import torch.nn as nn
 import torch_pruning as tp
 from torchvision import models
 import matplotlib.pyplot as plt
+from typing import Dict, Tuple
 from collections import OrderedDict
+from flwr.common.typing import Scalar
 from torch.utils.data import DataLoader, Dataset
 
 from utils import is_interactive
+from sklearn.metrics import classification_report
 from sklearn.model_selection import train_test_split
 
 
@@ -29,17 +32,17 @@ parser.add_argument("--server-address", type=str, default="localhost:12389", hel
 parser.add_argument("--ablation", type=str, default="None", help="Ablation study")
 parser.add_argument("--pruning", type=bool, default=False, help="Pruning")
 parser.add_argument("--pruning-ratio", type=float, default=0.5, help="Pruning ratio")
-
+parser.add_argument("--bn", type=bool, default=False, help="Set to True if you want to use FedBN model")
 
 if is_interactive():
   args, _ = parser.parse_known_args()
 else:
   args = parser.parse_args()
 
-
+bn = args.bn
 gpu_id = args.gpuid
 batch_size = args.batch_size
-num_epochs= args.epochs
+num_epochs = args.epochs
 client_id = args.client_id
 server_address = args.server_address
 
@@ -76,6 +79,38 @@ class Net(nn.Module):
     return self.feature_maps 
 
 
+class Net_bn(nn.Module):
+    """Constructs a ECA module.
+
+    Args:
+      channel: Number of channels of the input feature map
+      k_size: Adaptive selection of kernel size
+    """
+
+    def __init__(self, channel, k_size=3):
+        super(Net_bn, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.conv = nn.Conv1d(
+            1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False
+        )
+        # batch norm
+        self.bn = nn.BatchNorm2d(channel)
+        self.sigmoid = nn.Sigmoid()
+        self.feature_maps = None
+
+    def forward(self, x):
+        # feature descriptor on the global spatial information
+        y = self.avg_pool(x)
+
+        # Two different branches of ECA module
+        y = self.conv(y.squeeze(-1).transpose(-1, -2)).transpose(-1, -2).unsqueeze(-1)
+
+        # Multi-scale information fusion
+        y = self.sigmoid(y)
+
+        self.feature_maps = x * y.expand_as(x)
+
+        return self.feature_maps
 
 class VGG16WithECA(nn.Module):
   def __init__(self, num_classes=10, kernel_size=3, pretrained=True):
@@ -139,8 +174,44 @@ class VGG16WithECA(nn.Module):
   def get_last_eca_feature_maps(self):
     return self.features[-1].feature_maps
 
+class VGG16WithECA_bn(nn.Module):
+    def __init__(self, num_classes=10, kernel_size=3, pretrained=True):
+        super(VGG16WithECA_bn, self).__init__()
 
+        vgg = models.vgg16(pretrained=pretrained)
 
+        for param in vgg.features.parameters():
+            param.requires_grad = True
+
+        self.features = nn.Sequential(
+
+            *vgg.features[:5],  # Conv1-Conv2 + ReLU
+            Net_bn(kernel_size),
+
+            *vgg.features[5:10],  # Conv3-Conv4 + ReLU
+            Net_bn(kernel_size),
+
+            *vgg.features[10:17],  # Conv5-Conv7 + ReLU
+            Net_bn(kernel_size),
+
+            *vgg.features[17:24],  # Conv8-Conv10 + ReLU
+            Net_bn(kernel_size),
+
+            *vgg.features[24:],  # Conv11-Conv13 + ReLU
+            Net_bn(kernel_size),
+        )
+
+        self.classifier = vgg.classifier
+        self.classifier[-1] = nn.Linear(4096, num_classes)
+
+    def forward(self, x):
+        x = self.features(x)
+        x = torch.flatten(x, 1)
+        x = self.classifier(x)
+        return x
+
+    def get_last_eca_feature_maps(self):
+        return self.features[-1].feature_maps
 
 class CustomDataset(Dataset):
     def __init__(self, file_paths, class_labels, transform=None):
@@ -173,11 +244,13 @@ class CustomDataset(Dataset):
       return image, label
       
 
-def train(client_id, net, train_loader, val_loader, epochs, train_losses, train_accuracies, val_losses, val_accuracies):
+def train(client_id, net, train_loader, val_loader, epochs, train_losses, train_accuracies, val_losses, val_accuracies, proximal_mu):
   
   """Train the model on the training set."""
   criterion = torch.nn.CrossEntropyLoss()
   optimizer = torch.optim.SGD(net.parameters(), lr=0.0001, momentum=0.9)
+
+  global_params = [p.clone().detach() for p in net.parameters()]
 
   for epoch in range(epochs): 
     net.train()
@@ -190,8 +263,14 @@ def train(client_id, net, train_loader, val_loader, epochs, train_losses, train_
     for images, labels in pbar: 
       labels = labels.to(DEVICE)
       optimizer.zero_grad()
-      outputs = net(images.permute(0,3,1,2).to(DEVICE))
-      loss = criterion(outputs, labels)
+      outputs = net(images.permute(0, 3, 1, 2).to(DEVICE))
+
+      # FedProx --> FedAvg if proximal_mu == 0
+      proximal_term = 0
+      for i, (local_weights, global_weights) in enumerate(zip(net.parameters(), global_params)):
+          proximal_term += (local_weights - global_weights).norm(2)
+      loss = criterion(outputs, labels) + (proximal_mu / 2) * proximal_term
+
       loss.backward()
       optimizer.step()
 
@@ -245,48 +324,58 @@ def train(client_id, net, train_loader, val_loader, epochs, train_losses, train_
 
            # Early stopping
           if val_loss < best_loss:
-            best_loss = val_loss     
-            patience = 10  
+            best_loss = val_loss
+            patience = 10
           else:
             patience -= 1
             if patience == 0:
               print("Early stopping triggered!")
               break
-              
 
   return  train_losses, train_accuracies, val_losses, val_accuracies
 
 
+def test(net, testloader, class_labels):
+    """Validate the model on the test set."""
+
+    all_labels = []
+    all_predictions = []
+
+    criterion = torch.nn.CrossEntropyLoss()
+    correct, total, loss = 0, 0, 0.0
+    with torch.no_grad():
+        for images, labels in testloader:
+            labels = labels.to(DEVICE)
+            images = images.to(DEVICE)
+            images = images.permute(0, 3, 1, 2)
+            outputs = net(images)
+            loss += criterion(outputs, labels.to(DEVICE)).item()
+
+            _, predicted = torch.max(outputs.data, 1)
+            all_labels.extend(labels.cpu().numpy())
+            all_predictions.extend(predicted.cpu().numpy())
+
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+        print(
+            "Accuracy of the network on the {} test images: {} %".format(
+                len(testloader.dataset), 100 * correct / total
+            )
+        )
+
+        print(
+            "Loss of the network on the {} test images: {}".format(
+                len(testloader.dataset), loss / len(testloader.dataset)
+            )
+        )
+
+        print("\nClassification Report:")
+        labels = list(range(len(class_labels)))
+        print(classification_report(all_labels, all_predictions, labels=labels, target_names=class_labels))
 
 
-def test(net, testloader):
-  """Validate the model on the test set."""
-
-  all_labels = []
-  all_predictions = []
-
-  criterion = torch.nn.CrossEntropyLoss()
-  correct, total, loss = 0, 0, 0.0
-  with torch.no_grad():
-    for images, labels in testloader:
-      labels = labels.to(DEVICE)
-      images = images.to(DEVICE)
-      images = images.permute(0,3,1,2)   
-      outputs = net(images)
-      loss += criterion(outputs, labels.to(DEVICE)).item()
-    
-      _, predicted = torch.max(outputs.data, 1)
-      all_labels.extend(labels.cpu().numpy())
-      all_predictions.extend(predicted.cpu().numpy())
-
-
-      total += labels.size(0)
-      correct += (predicted == labels).sum().item()
-
-    print('Accuracy of the network on the {} test images: {} %'.format(len(testloader.dataset), 100 * correct / total))
-    
-    print('Loss of the network on the {} test images: {}'.format(len(testloader.dataset), loss / len(testloader.dataset)))
-  return loss / len(testloader.dataset), correct / total
+    return loss / len(testloader.dataset), correct / total
 
 
 
@@ -353,20 +442,37 @@ class FlowerClient(fl.client.NumPyClient):
     self.all_predictions = []
     self.client_id = client_id
     self.num_epochs = num_epochs 
+    self.bn = bn
 
   def get_parameters(self, config):
-    return [val.cpu().numpy() for _, val in net.state_dict().items()]
+    if self.bn:
+      return [
+        val.cpu().numpy()
+        for name, val in self.net.state_dict().items()
+        if "bn" not in name
+      ]
+    else:
+      return [val.cpu().numpy() for _, val in self.net.state_dict().items()]
 
   def set_parameters(self, parameters):
-    params_dict = zip(net.state_dict().keys(), parameters)
-    state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
-    net.load_state_dict(state_dict, strict=True)
+    if self.bn:
+      keys = [k for k in self.net.state_dict().keys() if "bn" not in k]
+      params_dict = zip(keys, parameters)
+      state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+      self.net.load_state_dict(state_dict, strict=False)
+    else:
+      params_dict = zip(self.net.state_dict().keys(), parameters)
+      state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+      self.net.load_state_dict(state_dict, strict=True)
 
   def fit(self, parameters, config):
+
+    self.proximal_mu = config["proximal_mu"]
+
     self.set_parameters(parameters)
     self.train_losses , self.train_accuracies, self.val_losses, self.val_accuracies = train(
       self.client_id, net, train_loader, val_loader, self.num_epochs, self.train_losses, self.train_accuracies,
-        self.val_losses, self.val_accuracies)
+        self.val_losses, self.val_accuracies, self.proximal_mu)
     
     self.plot()
 
@@ -421,6 +527,388 @@ def calculate_model_size(model, file_path="temp_model.pth"):
     model_size = os.path.getsize(file_path) / 1e6  # MB
     os.remove(file_path)
     return model_size
+
+
+# %% SCAFFOLD
+
+from torch.optim import SGD
+class ScaffoldOptimizer(SGD):
+  """Implements SGD optimizer step function as defined in the SCAFFOLD paper."""
+
+  def __init__(self, grads, step_size, momentum, weight_decay):
+    super().__init__(
+      grads, lr=step_size, momentum=momentum, weight_decay=weight_decay
+    )
+
+  def step_custom(self, server_cv, client_cv, device):
+    """Implement the custom step function fo SCAFFOLD."""
+    self.step()
+    for group in self.param_groups:
+      for par, s_cv, c_cv in zip(group["params"], server_cv, client_cv):
+        s_cv = s_cv.to(device)
+        c_cv = c_cv.to(device)
+        par.data.add_(s_cv - c_cv, alpha=-group["lr"])
+
+
+def train_scaffold(
+    net: nn.Module,
+    trainloader: DataLoader,
+    device: torch.device,
+    epochs: int,
+    learning_rate: float,
+    momentum: float,
+    weight_decay: float,
+    server_cv: torch.Tensor,
+    client_cv: torch.Tensor,
+) -> None:
+    """Train the network on the training set using SCAFFOLD.
+
+    Parameters
+    ----------
+    net : nn.Module
+        The neural network to train.
+    trainloader : DataLoader
+        The training set dataloader object.
+    device : torch.device
+        The device on which to train the network.
+    epochs : int
+        The number of epochs to train the network.
+    learning_rate : float
+        The learning rate.
+    momentum : float
+        The momentum for SGD optimizer.
+    weight_decay : float
+        The weight decay for SGD optimizer.
+    server_cv : torch.Tensor
+        The server's control variate.
+    client_cv : torch.Tensor
+        The client's control variate.
+    """
+    criterion = nn.CrossEntropyLoss()
+    optimizer = ScaffoldOptimizer(
+        net.parameters(), learning_rate, momentum, weight_decay
+    )
+    net.train()
+    for epoch in range(epochs):
+        net, train_loss, correct_train, total_train = _train_one_epoch_scaffold(
+            net, trainloader, device, criterion, optimizer, server_cv, client_cv
+        )
+
+        avg_train_loss = train_loss / total_train
+        train_accuracy = 100 * correct_train / total_train
+
+
+        print(
+            "Epoch [{}/{}], Training Loss: {:.4f}, Accuracy: {:.2f}%".format(
+                epoch + 1, epochs, avg_train_loss, train_accuracy
+            )
+        )
+
+
+
+def _train_one_epoch_scaffold(
+    net: nn.Module,
+    trainloader: DataLoader,
+    device: torch.device,
+    criterion: nn.Module,
+    optimizer: ScaffoldOptimizer,
+    server_cv: torch.Tensor,
+    client_cv: torch.Tensor,
+) -> nn.Module:
+    
+    """Train the network on the training set for one epoch."""
+    pbar = tqdm(trainloader, total=len(trainloader))
+    train_loss = 0
+    correct_train = 0
+    total_train = 0
+    for data, target in pbar:
+        data, target = data.permute(0, 3, 1, 2).to(device), target.to(device)
+        optimizer.zero_grad()
+        output = net(data)
+        loss = criterion(output, target)
+        loss.backward()
+        optimizer.step_custom(server_cv, client_cv, device)
+
+        train_loss += loss.item() * target.size(0)
+        _, predicted = torch.max(output.data, 1)
+        total_train += target.size(0)
+        correct_train += (predicted == target).sum().item()
+
+    return net, train_loss, correct_train, total_train
+
+
+def test_scaffold(
+    net: nn.Module, testloader: DataLoader, device: torch.device
+) -> Tuple[float, float]:
+    """Evaluate the network on the test set.
+
+    Parameters
+    ----------
+    net : nn.Module
+        The neural network to evaluate.
+    testloader : DataLoader
+        The test set dataloader object.
+    device : torch.device
+        The device on which to evaluate the network.
+
+    Returns
+    -------
+    Tuple[float, float]
+        The loss and accuracy of the network on the test set.
+    """
+    # criterion = nn.CrossEntropyLoss(reduction="sum")
+    criterion = torch.nn.CrossEntropyLoss()
+    net.eval()
+    correct, total, loss = 0, 0, 0.0
+    all_labels = []
+    all_predictions = []
+    with torch.no_grad():
+        print("test loader length:", len(testloader))
+        pbar = tqdm(testloader, total=len(testloader))
+        for data, target in pbar:
+            data, target = data.permute(0, 3, 1, 2).to(device), target.to(device)
+            output = net(data)
+            loss += criterion(output, target).item()
+            _, predicted = torch.max(output.data, 1)
+            all_labels.extend(target.cpu().numpy())
+            all_predictions.extend(predicted.cpu().numpy())
+            total += target.size(0)
+            correct += (predicted == target).sum().item()
+        print(
+            "Accuracy of the network on the {} test images: {} %".format(
+                len(testloader.dataset), 100 * correct / total
+            )
+        )
+
+        print(
+            "Loss of the network on the {} test images: {}".format(
+                len(testloader.dataset), loss / len(testloader.dataset)
+            )
+        )
+
+    print("\nClassification Report:")
+    labels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    print(classification_report(all_labels, all_predictions, labels=labels, target_names=class_labels))
+
+    return  loss / total, correct / total
+
+class ScaffoldClient(fl.client.NumPyClient):
+    """Flower client for SCAFFOLD."""
+    def __init__(
+        self,
+        cid: int,
+        net: torch.nn.Module,
+        trainloader: DataLoader,
+        valloader: DataLoader,
+        device: torch.device,
+        num_epochs: int,
+        learning_rate: float,
+        momentum: float,
+        weight_decay: float,
+        save_dir: str = "",
+    ) -> None:
+        self.cid = cid
+        self.net = net
+        self.trainloader = trainloader
+        self.valloader = valloader
+        self.device = device
+        self.num_epochs = num_epochs
+        self.learning_rate = learning_rate
+        self.momentum = momentum
+        self.weight_decay = weight_decay
+        # initialize client control variate with 0 and shape of the network parameters
+        self.client_cv = []
+        for param in self.net.parameters():
+            self.client_cv.append(torch.zeros(param.shape))
+        # save cv to directory
+        if save_dir == "":
+            save_dir = "client_cvs"
+        self.dir = save_dir
+        if not os.path.exists(self.dir):
+            os.makedirs(self.dir)
+
+    def get_parameters(self, config: Dict[str, Scalar]):
+        """Return the current local model parameters."""
+        print(f"Client {self.cid}: inviando parametri personalizzati!")
+        return [val.cpu().numpy() for _, val in self.net.state_dict().items()]
+
+    def set_parameters(self, parameters):
+        """Set the local model parameters using given ones."""
+        params_dict = zip(self.net.state_dict().keys(), parameters)
+        state_dict = OrderedDict({k: torch.Tensor(v) for k, v in params_dict})
+        self.net.load_state_dict(state_dict, strict=True)
+
+    def fit_scaffold(self, parameters, config: Dict[str, Scalar]):
+        """Implement distributed fit function for a given client for SCAFFOLD."""
+        # the first half are model parameters and the second are the server_cv
+        server_cv = parameters[len(parameters) // 2 :]
+        parameters = parameters[: len(parameters) // 2]
+        self.set_parameters(parameters)
+        self.client_cv = []
+        for param in self.net.parameters():
+            self.client_cv.append(param.clone().detach())
+        # load client control variate
+        if os.path.exists(f"{self.dir}/client_cv_{self.cid}.pt"):
+            self.client_cv = torch.load(f"{self.dir}/client_cv_{self.cid}.pt")
+        # convert the server control variate to a list of tensors
+        server_cv = [torch.Tensor(cv) for cv in server_cv]
+        train_scaffold(
+            self.net,
+            self.trainloader,
+            self.device,
+            self.num_epochs,
+            self.learning_rate,
+            self.momentum,
+            self.weight_decay,
+            server_cv,
+            self.client_cv,
+        )
+        x = parameters
+        y_i = self.get_parameters(config={})
+        c_i_n = []
+        server_update_x = []
+        server_update_c = []
+        # update client control variate
+        for c_i_j, c_j, x_j, y_i_j in zip(self.client_cv, server_cv, x, y_i):
+            c_i_n.append(
+                c_i_j
+                - c_j
+                + (1.0 / (self.learning_rate * self.num_epochs * len(self.trainloader)))
+                * (x_j - y_i_j)
+            )
+
+            server_update_x.append((y_i_j - x_j))
+            server_update_c.append((c_i_n[-1] - c_i_j).cpu().numpy())
+        self.client_cv = c_i_n
+        torch.save(self.client_cv, f"{self.dir}/client_cv_{self.cid}.pt")
+
+        combined_updates = server_update_x + server_update_c
+
+        self.plot()
+
+        return (
+            combined_updates,
+            len(self.trainloader.dataset),
+            {},
+        )
+    
+    def fit(self, parameters, config: Dict[str, Scalar]):
+        """Implement distributed fit function for a given client for SCAFFOLD."""
+
+        server_cv = parameters[len(parameters) // 2 :]
+        parameters = parameters[: len(parameters) // 2]
+        self.set_parameters(parameters)
+        self.client_cv = []
+        for param in self.net.parameters():
+            self.client_cv.append(param.clone().detach())
+        # load client control variate
+        if os.path.exists(f"{self.dir}/client_cv_{self.cid}.pt"):
+            self.client_cv = torch.load(f"{self.dir}/client_cv_{self.cid}.pt")
+        # convert the server control variate to a list of tensors
+        server_cv = [torch.Tensor(cv) for cv in server_cv]
+        train_scaffold(
+            self.net,
+            self.trainloader,
+            self.device,
+            self.num_epochs,
+            self.learning_rate,
+            self.momentum,
+            self.weight_decay,
+            server_cv,
+            self.client_cv,
+        )
+        x = parameters
+        y_i = self.get_parameters(config={})
+        c_i_n = []
+        server_update_x = []
+        server_update_c = []
+        # update client control variate c_i_1 = c_i - c + 1/eta*K (x - y_i)
+        for c_i_j, c_j, x_j, y_i_j in zip(self.client_cv, server_cv, x, y_i):
+            c_i_j = c_i_j.to('cpu')
+            c_j = c_j.to('cpu')
+            # x_j = x_j.to(self.device)
+            # y_i_j = y_i_j.to(self.device)
+            c_i_n.append(
+                c_i_j
+                - c_j
+                + (1.0 / (self.learning_rate * self.num_epochs * len(self.trainloader)))
+                * (x_j - y_i_j)
+            )
+            # y_i - x, c_i_n - c_i for the server
+            server_update_x.append((y_i_j - x_j))
+            server_update_c.append((c_i_n[-1] - c_i_j).cpu().numpy())
+        self.client_cv = c_i_n
+        torch.save(self.client_cv, f"{self.dir}/client_cv_{self.cid}.pt")
+
+        combined_updates = server_update_x + server_update_c
+
+        return (
+            combined_updates,
+            len(self.trainloader.dataset),
+            {},
+        )
+    
+    # def to_client(self):
+    #     """Registra i metodi personalizzati e forza l'uso di questa classe."""
+    #     return fl.client.Client(
+    #         get_parameters=self.get_parameters,  # Registra esplicitamente la funzione
+    #         fit=self.fit,
+    #         evaluate=self.evaluate,
+    #     )
+
+    # def to_client(self):
+    #     """Crea un client compatibile con Flower registrando i metodi personalizzati."""
+    #     return fl.client.ClientApp(self) 
+
+    def evaluate(self, parameters, config: Dict[str, Scalar]):
+        """Evaluate using given parameters."""
+        self.set_parameters(parameters)
+        loss, acc = test_scaffold(self.net, self.valloader, self.device)
+        return float(loss), len(self.valloader.dataset), {"accuracy": float(acc)}
+    
+
+    def plot(self):
+
+        # Calcolo del numero di round
+        num_rounds = len(self.train_losses) // self.num_epochs
+
+        # Creazione degli xticks: un tick per ogni round
+        round_ticks = [i * num_epochs for i in range(num_rounds)]
+
+        output_dir = "output_flower"
+        os.makedirs(output_dir, exist_ok=True)
+        output_file = os.path.join(output_dir, f"metrics_client_{client_id}.png")
+
+        # Plot delle metriche alla fine del training
+        plt.figure(figsize=(12, 6))
+
+        # Subplot 1: Loss
+        plt.subplot(1, 2, 1)
+        plt.plot(self.train_losses, label="Training Loss")
+        if self.val_losses != []:
+            plt.plot(self.val_losses, label="Validation Loss")
+        plt.title("Loss Over Rounds")
+        plt.xlabel("Rounds")
+        plt.ylabel("Loss")
+        plt.xticks(round_ticks, labels=[str(i + 1) for i in range(num_rounds)])
+        plt.legend()
+
+        # Subplot 2: Accuracy
+        plt.subplot(1, 2, 2)
+        plt.plot(self.train_accuracies, label="Training Accuracy")
+        if self.val_accuracies != []:
+            plt.plot(self.val_accuracies, label="Validation Accuracy")
+        plt.title("Accuracy Over Rounds")
+        plt.xlabel("Rounds")
+        plt.ylabel("Accuracy (%)")
+        plt.xticks(round_ticks, labels=[str(i + 1) for i in range(num_rounds)])
+        plt.legend()
+
+        # Salva il plot
+        plt.tight_layout()
+        plt.savefig(output_file)
+        # plt.show()
+    
 
 # %%
 file_path = "load.json"
@@ -503,6 +991,13 @@ if args.pruning:
   model_size = calculate_model_size(net)
   print(f"Model size after pruning: {model_size:.2f} MB")
 
-# Start Flower client
-fl.client.start_client(grpc_max_message_length = 538_145_477, server_address = server_address, client=FlowerClient(client_id).to_client())
+# Start Flower client -- choose the client
+
+# FedAvg and FedProx
+client=FlowerClient(client_id, net, bn).to_client()
+
+# SCAFFOLD
+# client=ScaffoldClient(client_id, net, train_loader, test_loader, DEVICE, num_epochs, 0.0001, 0.9, 0).to_client(),
+
+fl.client.start_client(grpc_max_message_length = 1_074_422_052, server_address = server_address, client=client)
 

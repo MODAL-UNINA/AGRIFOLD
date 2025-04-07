@@ -1,6 +1,10 @@
 import flwr as fl
 import argparse
 from utils import is_interactive
+from custom_server import ScaffoldServer
+from SCAFFOLD_strategy import ScaffoldStrategy
+
+
 
 parser = argparse.ArgumentParser(allow_abbrev=False)
 
@@ -21,9 +25,27 @@ open(status_file, "a").close()
 
 print(f"Server starting with {NUM_ROUNDS} rounds and min_fit_clients {min_fit_clients}")
 
+# FedAvg - FedProx strategy
+strategy= fl.server.strategy.FedProx(
+  min_fit_clients=min_fit_clients,
+  min_evaluate_clients=min_fit_clients,
+  min_available_clients=min_fit_clients,
+  proximal_mu=0.9 # FedProx with proximal_mu == 0 is equivalent to FedAvg
+)
+
+# SCAFFOLD 
+# server=ScaffoldServer(
+#   strategy=ScaffoldStrategy(
+#     min_fit_clients=min_fit_clients,
+#     min_evaluate_clients=min_fit_clients,
+#     min_available_clients=min_fit_clients,
+#   ),
+# )
+
+
 # Start Flower server
-fl.server.start_server(grpc_max_message_length = 538_145_477,
+fl.server.start_server(grpc_max_message_length = 1_074_422_052,
   server_address=args.server_address,
   config=fl.server.ServerConfig(num_rounds=NUM_ROUNDS),
-  strategy = fl.server.strategy.FedAvg(min_fit_clients=min_fit_clients, min_available_clients=min_fit_clients),
+  strategy = strategy,
 )
