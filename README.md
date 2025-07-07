@@ -3,7 +3,7 @@
 ## Abstract
 Efficient and accurate detection of plant leaf diseases is crucial for safeguarding crop health and ensuring agricultural sustainability. However, the decentralized nature of agricultural data and the limitations of centralized Machine Learning (ML) pose significant challenges to building scalable and privacy-preserving solutions. This paper proposes a Federated Learning (FL) framework to address these challenges, enabling collaborative training of a lightweight Convolutional Neural Network (CNN) model across diverse and distributed datasets. By integrating an Efficient Channel Attention (ECA) mechanism into a VGG16 architecture, the proposed framework AGRIFOLD enhances classification accuracy while providing explainable visualizations through heatmaps that highlight diseased leaf regions. The model's lightweight design, achieved through ablation and pruning techniques, ensures deployment feasibility on resource-constrained edge devices. To further assist farmers, the framework includes a recommender system powered by natural language processing to suggest tailored treatments for detected diseases. The framework's performance was evaluated using 12 heterogeneous datasets, achieving high accuracy in disease classification across 9 leaf disease classes and the healthy class. This research demonstrates the potential of FL to enable secure, scalable, and interpretable solutions for plant health monitoring, paving the way for real-world agricultural applications.
 
-![Framework](architecture.jpg)
+![Framework](architecture.png)
 
 ## Table of Contents
 - [Overview](#overview)
