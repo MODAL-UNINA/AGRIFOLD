@@ -1,1 +1,17 @@
-
+name: agrifold
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.11
+  - ipywidgets=8.1
+  - notebook=7.2
+  - pip=24.3
+  - pytorch::pytorch=2.5
+  - pytorch::pytorch-cuda=12.1
+  - pytorch::torchvision=0.20
+  - pytorch::torchaudio=2.5
+  - pip:
+      - opencv-python>=4.10,<4.11
